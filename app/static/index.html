@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BotChat</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; margin: 0; height: 100vh; display: flex; }
+    #sidebar { width: 260px; border-right: 1px solid #ddd; display: flex; flex-direction: column; padding: 12px; gap: 8px; }
+    #newChat { padding: 10px; cursor: pointer; }
+    #list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+    .conv { display: flex; align-items: center; justify-content: space-between; padding: 8px; border-radius: 6px; cursor: pointer; }
+    .conv:hover { background: #f1f5f9; }
+    .conv.active { background: #dbeafe; }
+    .conv span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .conv button { border: none; background: none; cursor: pointer; color: #888; }
+    #main { flex: 1; display: flex; flex-direction: column; padding: 12px; min-width: 0; }
+    #messages { flex: 1; overflow-y: auto; border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+    .bubble { margin: 8px 0; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; max-width: 85%; }
+    .user { background: #dbeafe; margin-left: auto; }
+    .assistant { background: #f1f5f9; }
+    .error { color: #b91c1c; }
+    #usage { font-size: 12px; color: #666; margin-top: 6px; min-height: 16px; }
+    form { display: flex; gap: 8px; margin-top: 8px; }
+    #input { flex: 1; padding: 10px; }
+    #stopBtn { display: none; }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <button id="newChat">+ New Chat</button>
+    <div id="list"></div>
+  </div>
+
+  <div id="main">
+    <div id="messages"></div>
+    <div id="usage"></div>
+    <form id="form">
+      <input id="input" placeholder="Type a message..." autocomplete="off">
+      <button id="sendBtn" type="submit">Send</button>
+      <button id="stopBtn" type="button">Stop</button>
+    </form>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const messagesEl = $("messages"), listEl = $("list"), usageEl = $("usage");
+    const form = $("form"), input = $("input"), sendBtn = $("sendBtn"), stopBtn = $("stopBtn");
+
+    let convId = null;
+    let controller = null;
+
+    // ---------- Helpers ----------
+    function addBubble(role, text) {
+      const el = document.createElement("div");
+      el.className = "bubble " + role;
+      el.textContent = text;
+      messagesEl.appendChild(el);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return el;
+    }
+
+    function setBusy(busy) {
+      sendBtn.style.display = busy ? "none" : "";
+      stopBtn.style.display = busy ? "" : "none";
+      input.disabled = busy;
+    }
+
+    // ---------- Conversation list ----------
+    async function loadList() {
+      const res = await fetch("/conversations");
+      const items = await res.json();
+      listEl.innerHTML = "";
+      for (const c of items) {
+        const row = document.createElement("div");
+        row.className = "conv" + (c.id === convId ? " active" : "");
+
+        const title = document.createElement("span");
+        title.textContent = c.title;
+
+        const del = document.createElement("button");
+        del.textContent = "✕";
+        del.title = "Delete";
+        del.onclick = async (e) => {
+          e.stopPropagation();
+          await fetch(`/conversations/${c.id}`, { method: "DELETE" });
+          if (c.id === convId) newChat();
+          loadList();
+        };
+
+        row.onclick = () => openConversation(c.id);
+        row.append(title, del);
+        listEl.appendChild(row);
+      }
+    }
+
+    async function openConversation(id) {
+      const res = await fetch(`/conversations/${id}`);
+      if (!res.ok) return;
+      const conv = await res.json();
+      convId = conv.id;
+      messagesEl.innerHTML = "";
+      for (const m of conv.messages) addBubble(m.role, m.content);
+      loadUsage();
+      loadList();
+    }
+
+    function newChat() {
+      convId = null;
+      messagesEl.innerHTML = "";
+      usageEl.textContent = "";
+      loadList();
+    }
+
+    async function loadUsage() {
+      if (!convId) return;
+      const res = await fetch(`/conversations/${convId}/usage`);
+      if (!res.ok) return;
+      const u = await res.json();
+      usageEl.textContent =
+        `Messages: ${u.messages_count} · Tokens: input ${u.tokens_in}, output ${u.tokens_out}, total ${u.tokens_total}`;
+    }
+
+    // ---------- Sending messages ----------
+    async function ensureConversation() {
+      if (convId) return convId;
+      const res = await fetch("/conversations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ system_prompt: "Reply briefly in English." }),
+      });
+      convId = (await res.json()).id;
+      return convId;
+    }
+
+    function handleEvent(ev, bubble) {
+      if (ev.type === "token") {
+        bubble.textContent += ev.text;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      } else if (ev.type === "error") {
+        bubble.classList.add("error");
+        bubble.textContent += "\n[" + ev.message + "]";
+      }
+    }
+
+    async function send(text) {
+      addBubble("user", text);
+      const bubble = addBubble("assistant", "");
+      controller = new AbortController();
+      setBusy(true);
+
+      try {
+        const id = await ensureConversation();
+        const res = await fetch(`/conversations/${id}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: text }),
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          bubble.classList.add("error");
+          bubble.textContent = "Server error: " + res.status;
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop();
+          for (const raw of parts) {
+            if (!raw.startsWith("data: ")) continue;
+            handleEvent(JSON.parse(raw.slice(6)), bubble);
+          }
+        }
+      } catch (e) {
+        if (e.name === "AbortError") {
+          bubble.textContent += "\n[Stopped]";
+        } else {
+          bubble.classList.add("error");
+          bubble.textContent = "Network unavailable";
+        }
+      } finally {
+        controller = null;
+        setBusy(false);
+        input.focus();
+        loadList();
+        loadUsage();
+      }
+    }
+
+    // ---------- Event handlers ----------
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      send(text);
+    });
+
+    stopBtn.onclick = () => controller && controller.abort();
+    $("newChat").onclick = newChat;
+
+    loadList();
+  </script>
+</body>
+</html>

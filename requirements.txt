@@ -1,0 +1,9 @@
+alembic==1.20.1
+asyncpg==0.32.0
+fastapi==0.162.0
+openai==3.44.0
+pydantic-settings==2.16.2
+SQLAlchemy==2.1.7
+tenacity==9.2.1
+uvicorn==0.54.0
+greenlet
